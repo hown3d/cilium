@@ -362,7 +362,7 @@ func (p *selectorPolicy) DistillPolicy(logger *slog.Logger, policyOwner PolicyOw
 	p.L4Policy.Egress.toMapState(logger, calculatedPolicy)
 
 	if !policyOwner.IsHost() {
-		calculatedPolicy.policyMapState.determineAllowLocalhostIngress()
+		calculatedPolicy.policyMapState.determineAllowLocalhostIngress(p.L4Policy.Ingress.features)
 	}
 
 	return calculatedPolicy

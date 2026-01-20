@@ -40,10 +40,14 @@ func FuzzDistillPolicy(f *testing.F) {
 
 		if debug {
 			strs := []string{}
+			defaultDeny := false
 			for _, entry := range entries {
+				if entry.DefaultDeny {
+					defaultDeny = true
+				}
 				strs = append(strs, entry.Log.Value)
 			}
-			t.Log("Rule corpus:\n" + strings.Join(strs, "\n"))
+			t.Log("Rule corpus:\n" + strings.Join(strs, "\n") + fmt.Sprintf("\n- default deny: %v\n", defaultDeny))
 		}
 
 		// resolve policy
@@ -55,6 +59,7 @@ func FuzzDistillPolicy(f *testing.F) {
 		if err != nil {
 			t.Fatal(err) // should never happen
 		}
+
 		epp := selPol.DistillPolicy(logger, srcEP, nil)
 		epp.Ready()
 		epp.Detach(logger)
@@ -66,7 +71,18 @@ func FuzzDistillPolicy(f *testing.F) {
 		for _, flow := range flows {
 			// lookup from the distilled map state
 			key := EgressKey().WithIdentity(flow.To.ID).WithPortProto(flow.Proto, flow.Dport)
-			egressEntry, _, _ := epp.Lookup(key)
+			if debug {
+				t.Log("Lookup key", key.String())
+			}
+
+			egressEntry, meta, found := epp.Lookup(key)
+
+			if debug {
+				t.Log("Lookup result",
+					"entry", egressEntry.String(),
+					"meta", meta,
+					"found", found)
+			}
 
 			// simulate policy iteratively
 			simulateVerdict, _, _ := testutils.IteratePolicy(entries, flow)

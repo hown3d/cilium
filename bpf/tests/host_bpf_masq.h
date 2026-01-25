@@ -37,6 +37,11 @@ ASSIGN_CONFIG(bool, enable_conntrack_accounting, true)
 #include "lib/endpoint.h"
 #include "lib/ipcache.h"
 
+#include "nodeport_defaults.h"
+
+/* Set port ranges to have deterministic source port selection */
+ASSIGN_NODEPORT_DEFAULTS();
+
 /* Host-originating UDP should be tracked by BPF Masq. */
 PKTGEN("tc", "host_bpf_masq_v4_1_udp")
 int host_bpf_masq_v4_1_udp_pktgen(struct __ctx_buff *ctx)

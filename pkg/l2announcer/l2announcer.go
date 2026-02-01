@@ -33,6 +33,7 @@ import (
 	cilium_api_v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/k8s/resource"
+	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	"github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/labels"
 	slim_meta_v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/k8s/utils"
@@ -53,7 +54,8 @@ var Cell = cell.Module(
 )
 
 func l2AnnouncementPolicyResource(lc cell.Lifecycle, cs k8sClient.Clientset,
-	mp workqueue.MetricsProvider) (resource.Resource[*cilium_api_v2alpha1.CiliumL2AnnouncementPolicy], error) {
+	mp workqueue.MetricsProvider,
+) (resource.Resource[*cilium_api_v2alpha1.CiliumL2AnnouncementPolicy], error) {
 	if !cs.IsEnabled() {
 		return nil, nil
 	}
@@ -68,16 +70,17 @@ type l2AnnouncerParams struct {
 
 	Logger *slog.Logger
 
-	DaemonConfig         *option.DaemonConfig
-	Clientset            k8sClient.Clientset
-	Services             statedb.Table[*loadbalancer.Service]
-	Frontends            statedb.Table[*loadbalancer.Frontend]
-	L2AnnouncementPolicy resource.Resource[*cilium_api_v2alpha1.CiliumL2AnnouncementPolicy]
-	LocalNodeResource    daemon_k8s.LocalCiliumNodeResource
-	L2AnnounceTable      statedb.RWTable[*tables.L2AnnounceEntry]
-	Devices              statedb.Table[*tables.Device]
-	StateDB              *statedb.DB
-	JobGroup             job.Group
+	DaemonConfig            *option.DaemonConfig
+	Clientset               k8sClient.Clientset
+	Services                statedb.Table[*loadbalancer.Service]
+	Frontends               statedb.Table[*loadbalancer.Frontend]
+	L2AnnouncementPolicy    resource.Resource[*cilium_api_v2alpha1.CiliumL2AnnouncementPolicy]
+	LocalNodeResource       daemon_k8s.LocalNodeResource
+	LocalCiliumNodeResource daemon_k8s.LocalCiliumNodeResource
+	L2AnnounceTable         statedb.RWTable[*tables.L2AnnounceEntry]
+	Devices                 statedb.Table[*tables.Device]
+	StateDB                 *statedb.DB
+	JobGroup                job.Group
 }
 
 // L2Announcer takes all L2 announcement policies and filters down to those that match the labels of the local node. It
@@ -160,6 +163,7 @@ func (l2a *L2Announcer) run(ctx context.Context, health cell.Health) error {
 	}
 
 	policyChan := l2a.params.L2AnnouncementPolicy.Events(ctx)
+	localCiliumNodeChan := l2a.params.LocalCiliumNodeResource.Events(ctx)
 	localNodeChan := l2a.params.LocalNodeResource.Events(ctx)
 
 	devices, watchDevices := tables.SelectedDevices(l2a.params.Devices, l2a.params.StateDB.ReadTxn())
@@ -167,13 +171,13 @@ func (l2a *L2Announcer) run(ctx context.Context, health cell.Health) error {
 
 	// We have to first have a local node before we can start processing other events.
 	for {
-		event, more := <-localNodeChan
+		event, more := <-localCiliumNodeChan
 		// resource closed, shutting down
 		if !more {
 			return nil
 		}
 
-		if err := l2a.processLocalNodeEvent(ctx, event); err != nil {
+		if err := l2a.processLocalCiliumNodeEvent(ctx, event); err != nil {
 			l2a.params.Logger.Warn(
 				"Error processing local node event",
 				logfields.Error, err,
@@ -220,8 +224,20 @@ loop:
 				break loop
 			}
 
-			if err := l2a.processLocalNodeEvent(ctx, event); err != nil {
+			if err := l2a.processLocalNodeEvent(event); err != nil {
 				l2a.params.Logger.Warn("Error processing local node event",
+					logfields.Error, err,
+				)
+			}
+
+		case event, more := <-localCiliumNodeChan:
+			// resource closed, shutting down
+			if !more {
+				break loop
+			}
+
+			if err := l2a.processLocalCiliumNodeEvent(ctx, event); err != nil {
+				l2a.params.Logger.Warn("Error processing local cilium node event",
 					logfields.Error, err,
 				)
 			}
@@ -250,6 +266,45 @@ loop:
 	}
 
 	return nil
+}
+
+func (l2a *L2Announcer) processLocalNodeEvent(event resource.Event[*slim_corev1.Node]) error {
+	var err error
+	if event.Kind == resource.Upsert {
+		err = l2a.upsertLocalNode(event.Object)
+	}
+
+	event.Done(err)
+	return err
+}
+
+func (l2a *L2Announcer) upsertLocalNode(node *slim_corev1.Node) error {
+	if !nodeTaintedToBeDeleted(node) {
+		return nil
+	}
+	var errs error
+	for _, ss := range l2a.selectedServices {
+		if ss.currentlyLeader {
+			errs = errors.Join(errs, l2a.gcService(ss))
+		}
+	}
+	return errs
+}
+
+const (
+	// ToBeDeletedTaint is a taint used by the Cluster Autoscaler before marking a node for deletion. Defined in
+	// https://github.com/kubernetes/autoscaler/blob/e80ab518340f88f364fe3ef063f8303755125971/cluster-autoscaler/utils/deletetaint/delete.go#L36
+	toBeDeletedTaint = "ToBeDeletedByClusterAutoscaler"
+)
+
+// We consider the node to be leader of announcement only when it is not tainted for deletion by the cluster autoscaler.
+func nodeTaintedToBeDeleted(node *slim_corev1.Node) bool {
+	for _, taint := range node.Spec.Taints {
+		if taint.Key == toBeDeletedTaint {
+			return true
+		}
+	}
+	return false
 }
 
 // Called periodically to garbage collect any leases which are no longer held by any agent.
@@ -850,6 +905,10 @@ func (l2a *L2Announcer) gcOrphanedService(ss *selectedService) error {
 		return nil
 	}
 
+	return l2a.gcService(ss)
+}
+
+func (l2a *L2Announcer) gcService(ss *selectedService) error {
 	// Stop leader election routine
 	ss.stop()
 
@@ -863,10 +922,10 @@ func (l2a *L2Announcer) gcOrphanedService(ss *selectedService) error {
 	return nil
 }
 
-func (l2a *L2Announcer) processLocalNodeEvent(ctx context.Context, event resource.Event[*v2.CiliumNode]) error {
+func (l2a *L2Announcer) processLocalCiliumNodeEvent(ctx context.Context, event resource.Event[*v2.CiliumNode]) error {
 	var err error
 	if event.Kind == resource.Upsert {
-		err = l2a.upsertLocalNode(ctx, event.Object)
+		err = l2a.upsertLocalCiliumNode(ctx, event.Object)
 		if err != nil {
 			err = fmt.Errorf("upsert local node: %w", err)
 		}
@@ -876,7 +935,7 @@ func (l2a *L2Announcer) processLocalNodeEvent(ctx context.Context, event resourc
 	return err
 }
 
-func (l2a *L2Announcer) upsertLocalNode(ctx context.Context, localNode *v2.CiliumNode) error {
+func (l2a *L2Announcer) upsertLocalCiliumNode(ctx context.Context, localNode *v2.CiliumNode) error {
 	// If the label set did not change, nothing to do.
 	if l2a.localNode != nil && labels.Equals(l2a.localNode.Labels, labels.Set(localNode.Labels)) {
 		return nil
@@ -1152,7 +1211,6 @@ func (ss *selectedService) serviceLeaderElection(ctx context.Context, health cel
 				LeaseDuration: ss.leaseDuration,
 				RenewDeadline: ss.renewDeadline,
 				RetryPeriod:   ss.retryPeriod,
-
 				Callbacks: leaderelection.LeaderCallbacks{
 					OnStartedLeading: func(ctx context.Context) {
 						ss.leaderChannel <- leaderElectionEvent{

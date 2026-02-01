@@ -236,7 +236,7 @@ func TestHappyPath(t *testing.T) {
 	assert.NoError(t, err)
 
 	localNode := blueNode()
-	err = fix.announcer.upsertLocalNode(context.Background(), localNode)
+	err = fix.announcer.upsertLocalCiliumNode(context.Background(), localNode)
 	assert.NoError(t, err)
 	assert.Equal(t, localNode, fix.announcer.localNode)
 
@@ -334,7 +334,7 @@ func TestHappyPathPermutations(t *testing.T) {
 		t.Run(strings.Join(names, "_"), func(tt *testing.T) {
 			fix := newFixture(tt)
 
-			err := fix.announcer.upsertLocalNode(context.Background(), blueNode())
+			err := fix.announcer.upsertLocalCiliumNode(context.Background(), blueNode())
 			assert.NoError(tt, err)
 
 			for _, fn := range fns {
@@ -403,7 +403,7 @@ func TestPolicyRedundancy(t *testing.T) {
 
 	// Add local node
 	localNode := blueNode()
-	err = fix.announcer.upsertLocalNode(context.Background(), localNode)
+	err = fix.announcer.upsertLocalCiliumNode(context.Background(), localNode)
 	assert.NoError(t, err)
 	assert.Equal(t, localNode, fix.announcer.localNode)
 
@@ -508,7 +508,7 @@ func baseUpdateSetup(t *testing.T) *fixture {
 	require.Contains(t, fix.announcer.devices, "eno01")
 
 	localNode := blueNode()
-	err = fix.announcer.upsertLocalNode(context.Background(), localNode)
+	err = fix.announcer.upsertLocalCiliumNode(context.Background(), localNode)
 	require.NoError(t, err)
 	require.Equal(t, localNode, fix.announcer.localNode)
 
@@ -559,7 +559,7 @@ func TestUpdateHostLabels_NoMatch(t *testing.T) {
 	node := blueNode()
 	node.Labels["color"] = "cyan"
 
-	err := fix.announcer.processLocalNodeEvent(context.Background(), resource.Event[*v2.CiliumNode]{
+	err := fix.announcer.processLocalCiliumNodeEvent(context.Background(), resource.Event[*v2.CiliumNode]{
 		Kind:   resource.Upsert,
 		Key:    resource.NewKey(node),
 		Object: node,
@@ -635,7 +635,7 @@ func TestUpdateHostLabels_AdditionalMatch(t *testing.T) {
 		"hue":   "cyan",
 	}
 
-	err = fix.announcer.processLocalNodeEvent(context.Background(), resource.Event[*v2.CiliumNode]{
+	err = fix.announcer.processLocalCiliumNodeEvent(context.Background(), resource.Event[*v2.CiliumNode]{
 		Kind:   resource.Upsert,
 		Key:    resource.NewKey(node),
 		Object: node,
